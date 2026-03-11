@@ -109,43 +109,30 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
     }
 
     // Multi-SDK: create a runner and spec for each SDK
-    val sdkSpecPairs = sdks.map { sdk ->
+    data class SdkEntry(val sdk: Int, val runner: ContainedRobolectricRunner, val spec: Spec)
+
+    val sdkEntries = sdks.map { sdk ->
       val singleSdkConfig = Config.Builder(config).setSdk(sdk).build()
       val runner = ContainedRobolectricRunner(singleSdkConfig)
       val spec = runner.sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
-      Triple(sdk, runner, spec)
+      SdkEntry(sdk, runner, spec)
     }
 
-    val primarySpec = sdkSpecPairs.first().third
-    runnerMap[primarySpec] = sdkSpecPairs.first().second
+    // First SDK uses the original test names, additional SDKs get [SDK XX] prefix
+    val primary = sdkEntries.first()
+    runnerMap[primary.spec] = primary.runner
 
-    // Build SDK-prefixed tests from each SDK's spec
     val nameToRunner = mutableMapOf<String, ContainedRobolectricRunner>()
-    val prefixedTests = sdkSpecPairs.flatMap { (sdk, runner, spec) ->
-      spec.rootTests().map { test ->
-        val prefixedName = test.name.copy(name = "[SDK $sdk] ${test.name.name}")
-        nameToRunner[prefixedName.name] = runner
-        test.copy(name = prefixedName)
+    for (entry in sdkEntries.drop(1)) {
+      for (test in entry.spec.rootTests()) {
+        val prefixedName = test.name.copy(name = "[SDK ${entry.sdk}] ${test.name.name}")
+        nameToRunner[prefixedName.name] = entry.runner
+        (primary.spec as RootScope).add(test.copy(name = prefixedName))
       }
     }
 
-    // Replace primary spec's original tests with SDK-prefixed versions
-    clearRootTests(primarySpec)
-    val rootScope = primarySpec as RootScope
-    prefixedTests.forEach { rootScope.add(it) }
-
-    sdkRunnerMap[primarySpec] = nameToRunner
-    return primarySpec
-  }
-
-  private fun clearRootTests(spec: Spec) {
-    generateSequence<Class<*>>(spec::class.java) { it.superclass }
-      .find { it.simpleName == "DslDrivenSpec" }
-      ?.let { dslClass ->
-        val field = dslClass.getDeclaredField("rootTests")
-        field.isAccessible = true
-        field.set(spec, emptyList<Any>())
-      }
+    sdkRunnerMap[primary.spec] = nameToRunner
+    return primary.spec
   }
 
   override suspend fun intercept(
