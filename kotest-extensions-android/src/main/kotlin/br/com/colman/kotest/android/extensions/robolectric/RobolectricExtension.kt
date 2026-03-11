@@ -5,6 +5,7 @@ import io.kotest.core.extensions.ApplyExtension
 import io.kotest.core.extensions.ConstructorExtension
 import io.kotest.core.extensions.TestCaseExtension
 import io.kotest.core.spec.Spec
+import io.kotest.core.spec.style.scopes.RootScope
 import io.kotest.core.test.TestCase
 import io.kotest.core.test.isRootTest
 import io.kotest.engine.test.TestResult
@@ -22,6 +23,7 @@ import kotlin.time.Duration
 class RobolectricExtension : ConstructorExtension, TestCaseExtension {
 
   private val runnerMap = WeakHashMap<Spec, ContainedRobolectricRunner>()
+  private val sdkRunnerMap = WeakHashMap<Spec, Map<String, ContainedRobolectricRunner>>()
 
 
   private fun Class<*>.getParentClass(): List<Class<*>> {
@@ -46,19 +48,49 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
         .mapNotNull { it.kotlin.findAnnotation<RobolectricTest>() }
         .asSequence()
 
+    val sdk: IntArray? =
+      robolectricTestAnnotations.firstOrNull { it.sdk.isNotEmpty() }?.sdk
+    val minSdk: Int? =
+      robolectricTestAnnotations.firstOrNull { it.minSdk != -1 }?.minSdk
+    val maxSdk: Int? =
+      robolectricTestAnnotations.firstOrNull { it.maxSdk != -1 }?.maxSdk
+    val fontScale: Float? =
+      robolectricTestAnnotations.firstOrNull { it.fontScale != -1f }?.fontScale
     val application: KClass<out Application>? =
       robolectricTestAnnotations
         .firstOrNull { it.application != KotestDefaultApplication::class }?.application
-    val sdk: Int? = robolectricTestAnnotations.firstOrNull { it.sdk != -1 }?.takeUnless { it.sdk == -1 }?.sdk
+    val qualifiers: String? =
+      robolectricTestAnnotations.firstOrNull { it.qualifiers.isNotEmpty() }?.qualifiers
+    val shadows: Array<KClass<*>>? =
+      robolectricTestAnnotations.firstOrNull { it.shadows.isNotEmpty() }?.shadows
+    val instrumentedPackages: Array<String>? =
+      robolectricTestAnnotations.firstOrNull { it.instrumentedPackages.isNotEmpty() }?.instrumentedPackages
 
     return Config.Builder()
       .also { builder ->
+        if (sdk != null) {
+          builder.setSdk(*sdk)
+        }
+        if (minSdk != null) {
+          builder.setMinSdk(minSdk)
+        }
+        if (maxSdk != null) {
+          builder.setMaxSdk(maxSdk)
+        }
+        if (fontScale != null) {
+          builder.setFontScale(fontScale)
+        }
         if (application != null) {
           builder.setApplication(application.java)
         }
-
-        if (sdk != null) {
-          builder.setSdk(sdk)
+        if (qualifiers != null) {
+          builder.setQualifiers(qualifiers)
+        }
+        if (shadows != null) {
+          builder.setShadows(*shadows.map { it.java }.toTypedArray())
+        }
+        if (instrumentedPackages != null) {
+          builder.setInstrumentedPackages(*instrumentedPackages)
         }
       }.build()
   }
@@ -66,11 +98,54 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
   override fun <T : Spec> instantiate(clazz: KClass<T>): Spec? {
     clazz.findAnnotation<RobolectricTest>() ?: return null
 
-    val runner = ContainedRobolectricRunner(clazz.getConfig())
+    val config = clazz.getConfig()
+    val sdks = config.sdk
 
-    val spec = runner.sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
-    runnerMap[spec] = runner
-    return spec
+    if (sdks.size <= 1) {
+      val runner = ContainedRobolectricRunner(config)
+      val spec = runner.sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
+      runnerMap[spec] = runner
+      return spec
+    }
+
+    // Multi-SDK: create a runner and spec for each SDK
+    val sdkSpecPairs = sdks.map { sdk ->
+      val singleSdkConfig = Config.Builder(config).setSdk(sdk).build()
+      val runner = ContainedRobolectricRunner(singleSdkConfig)
+      val spec = runner.sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
+      Triple(sdk, runner, spec)
+    }
+
+    val primarySpec = sdkSpecPairs.first().third
+    runnerMap[primarySpec] = sdkSpecPairs.first().second
+
+    // Build SDK-prefixed tests from each SDK's spec
+    val nameToRunner = mutableMapOf<String, ContainedRobolectricRunner>()
+    val prefixedTests = sdkSpecPairs.flatMap { (sdk, runner, spec) ->
+      spec.rootTests().map { test ->
+        val prefixedName = test.name.copy(name = "[SDK $sdk] ${test.name.name}")
+        nameToRunner[prefixedName.name] = runner
+        test.copy(name = prefixedName)
+      }
+    }
+
+    // Replace primary spec's original tests with SDK-prefixed versions
+    clearRootTests(primarySpec)
+    val rootScope = primarySpec as RootScope
+    prefixedTests.forEach { rootScope.add(it) }
+
+    sdkRunnerMap[primarySpec] = nameToRunner
+    return primarySpec
+  }
+
+  private fun clearRootTests(spec: Spec) {
+    generateSequence<Class<*>>(spec::class.java) { it.superclass }
+      .find { it.simpleName == "DslDrivenSpec" }
+      ?.let { dslClass ->
+        val field = dslClass.getDeclaredField("rootTests")
+        field.isAccessible = true
+        field.set(spec, emptyList<Any>())
+      }
   }
 
   override suspend fun intercept(
@@ -107,7 +182,9 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
     testCase: TestCase,
     execute: suspend (TestCase) -> TestResult,
   ): TestResult {
-    val containedRobolectricRunner = runnerMap[testCase.spec]!!
+    val containedRobolectricRunner = sdkRunnerMap[testCase.spec]?.get(testCase.name.name)
+      ?: runnerMap[testCase.spec]!!
+
     if (testCase.isRootTest()) {
       containedRobolectricRunner.containedBefore()
     }
@@ -115,6 +192,7 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
     if (testCase.isRootTest()) {
       containedRobolectricRunner.containedAfter()
     }
+
     return result
   }
 }
@@ -125,6 +203,12 @@ internal class KotestDefaultApplication : Application()
 @Retention(AnnotationRetention.RUNTIME)
 @ApplyExtension(RobolectricExtension::class)
 annotation class RobolectricTest(
+  val sdk: IntArray = [],
+  val minSdk: Int = -1,
+  val maxSdk: Int = -1,
+  val fontScale: Float = -1f,
   val application: KClass<out Application> = KotestDefaultApplication::class,
-  val sdk: Int = -1,
+  val qualifiers: String = "",
+  val shadows: Array<KClass<*>> = [],
+  val instrumentedPackages: Array<String> = [],
 )
