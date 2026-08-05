@@ -1,6 +1,6 @@
 package br.com.colman.kotest.android.extensions.robolectric
 
-import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.experimental.runners.Enclosed
 import org.junit.runner.RunWith
@@ -17,6 +17,7 @@ import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.withContext
 
 @RunWith(Enclosed::class)
 internal class ContainedRobolectricRunner(
@@ -43,13 +44,31 @@ internal class ContainedRobolectricRunner(
    * sandbox must use the same thread, exactly like the stock RobolectricTestRunner reuses
    * the sandbox's own main thread across test classes.
    */
-  val environmentDispatcher: ExecutorCoroutineDispatcher =
+  val environmentDispatcher: CoroutineDispatcher =
     environmentDispatchers.getOrPut(sdkEnvironment) {
       Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "kotest-robolectric-${environmentThreadCount.incrementAndGet()}").apply {
           isDaemon = true
+          environmentThreads[sdkEnvironment] = this
         }
       }.asCoroutineDispatcher()
+    }
+
+  /**
+   * Runs [block] pinned to the environment thread. When the caller is already on that
+   * thread, the block runs inline: a nested test case whose container was wrapped in
+   * runTest (kotest's coroutineTestScope) arrives here with the test dispatcher in its
+   * context, and a real re-dispatch onto the single environment thread would queue
+   * behind the container already occupying it and deadlock. An immediate-style
+   * dispatcher is not a substitute — withContext would still install the foreign
+   * dispatcher into the context, which stalls the runTest completion machinery
+   * (measured hang).
+   */
+  suspend fun <T> runPinned(block: suspend () -> T): T =
+    if (Thread.currentThread() === environmentThreads[sdkEnvironment]) {
+      block()
+    } else {
+      withContext(environmentDispatcher) { block() }
     }
 
   fun containedBefore() {
@@ -94,7 +113,8 @@ internal class ContainedRobolectricRunner(
 
   companion object {
     private val environmentThreadCount = AtomicInteger()
-    private val environmentDispatchers = ConcurrentHashMap<Any, ExecutorCoroutineDispatcher>()
+    private val environmentDispatchers = ConcurrentHashMap<Any, CoroutineDispatcher>()
+    private val environmentThreads = ConcurrentHashMap<Any, Thread>()
 
     // Robolectric keys its sandbox cache correctly inside SandboxManager (by
     // instrumentation config, SDK, looper mode, ...), but every Injector creates

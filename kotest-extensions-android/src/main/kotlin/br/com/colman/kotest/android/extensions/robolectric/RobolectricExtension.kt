@@ -11,7 +11,6 @@ import io.kotest.core.spec.style.scopes.RootScope
 import io.kotest.core.test.TestCase
 import io.kotest.core.test.isRootTest
 import io.kotest.engine.test.TestResult
-import kotlinx.coroutines.withContext
 import org.robolectric.annotation.Config
 import java.util.WeakHashMap
 import kotlin.reflect.KClass
@@ -176,8 +175,8 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
       ?: runnerMap[testCase.spec]!!
 
     // Pin environment setup and test body to the runner's dedicated thread so that
-    // main-looper-bound APIs work from the test body. See environmentDispatcher docs.
-    return withContext(containedRobolectricRunner.environmentDispatcher) {
+    // main-looper-bound APIs work from the test body. See [ContainedRobolectricRunner.runPinned].
+    return containedRobolectricRunner.runPinned {
       if (testCase.isRootTest()) {
         containedRobolectricRunner.containedBefore()
       }
