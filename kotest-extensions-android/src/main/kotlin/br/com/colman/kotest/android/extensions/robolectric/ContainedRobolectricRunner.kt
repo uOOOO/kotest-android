@@ -31,6 +31,15 @@ internal class ContainedRobolectricRunner(
   private val bootStrapMethod = sdkEnvironment.bootstrappedClass<Any>(testClass.javaClass)
     .getMethod(PlaceholderTest::bootStrapMethod.name)
 
+  // Loaded through the sandbox classloader so android.* resolves inside the sandbox.
+  // See MainDispatcherInstaller docs.
+  private val mainDispatcherInstaller = sdkEnvironment
+    .bootstrappedClass<Any>(MainDispatcherInstaller::class.java)
+  private val installMainDispatcherMethod =
+    mainDispatcherInstaller.getMethod(MainDispatcherInstaller::install.name)
+  private val uninstallMainDispatcherMethod =
+    mainDispatcherInstaller.getMethod(MainDispatcherInstaller::uninstall.name)
+
   /**
    * Single dedicated thread that hosts both the Robolectric environment setup ([containedBefore])
    * and the test body. Robolectric binds thread-sensitive state (most notably the main Looper in
@@ -74,9 +83,11 @@ internal class ContainedRobolectricRunner(
   fun containedBefore() {
     Thread.currentThread().contextClassLoader = sdkEnvironment.robolectricClassLoader
     super.beforeTest(sdkEnvironment, placeHolderMethod, bootStrapMethod)
+    installMainDispatcherMethod.invoke(null)
   }
 
   fun containedAfter() {
+    uninstallMainDispatcherMethod.invoke(null)
     super.afterTest(placeHolderMethod, bootStrapMethod)
     super.finallyAfterTest(placeHolderMethod)
     Thread.currentThread().contextClassLoader = ContainedRobolectricRunner::class.java.classLoader

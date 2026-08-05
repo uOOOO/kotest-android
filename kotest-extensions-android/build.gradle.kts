@@ -57,6 +57,7 @@ dependencies {
   implementation("org.robolectric:robolectric:4.16.1")
   implementation("junit:junit:4.13.2")
   implementation("androidx.appcompat:appcompat:1.7.0")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 
   androidTestImplementation(project(":kotest-runner-android"))
   androidTestImplementation("androidx.test:runner:1.5.2")
