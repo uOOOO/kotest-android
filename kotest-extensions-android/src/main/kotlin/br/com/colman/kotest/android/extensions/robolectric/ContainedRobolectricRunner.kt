@@ -7,12 +7,14 @@ import org.junit.runner.RunWith
 import org.junit.runners.model.FrameworkMethod
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.internal.SandboxManager
 import org.robolectric.internal.bytecode.InstrumentationConfiguration
 import org.robolectric.pluginapi.config.ConfigurationStrategy
 import org.robolectric.pluginapi.config.Configurer
 import org.robolectric.plugins.HierarchicalConfigurationStrategy
 import org.robolectric.util.inject.Injector
 import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -34,13 +36,21 @@ internal class ContainedRobolectricRunner(
    * PAUSED mode) to the thread that runs the environment setup, so the test body must execute on
    * that same thread for main-looper-bound APIs (Robolectric.buildActivity, ShadowLooper.idle, ...)
    * to work. Coroutine dispatch gives no such guarantee by itself, hence the explicit pinning.
+   *
+   * Keyed by sandbox, not by runner: sandboxes are shared across specs with an equal
+   * configuration (see [sharedSandboxManager]), and Looper statics live in the sandbox
+   * classloader bound to the thread that prepared them — so every runner using the same
+   * sandbox must use the same thread, exactly like the stock RobolectricTestRunner reuses
+   * the sandbox's own main thread across test classes.
    */
   val environmentDispatcher: ExecutorCoroutineDispatcher =
-    Executors.newSingleThreadExecutor { runnable ->
-      Thread(runnable, "kotest-robolectric-${environmentThreadCount.incrementAndGet()}").apply {
-        isDaemon = true
-      }
-    }.asCoroutineDispatcher()
+    environmentDispatchers.getOrPut(sdkEnvironment) {
+      Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "kotest-robolectric-${environmentThreadCount.incrementAndGet()}").apply {
+          isDaemon = true
+        }
+      }.asCoroutineDispatcher()
+    }
 
   fun containedBefore() {
     Thread.currentThread().contextClassLoader = sdkEnvironment.robolectricClassLoader
@@ -84,11 +94,22 @@ internal class ContainedRobolectricRunner(
 
   companion object {
     private val environmentThreadCount = AtomicInteger()
+    private val environmentDispatchers = ConcurrentHashMap<Any, ExecutorCoroutineDispatcher>()
+
+    // Robolectric keys its sandbox cache correctly inside SandboxManager (by
+    // instrumentation config, SDK, looper mode, ...), but every Injector creates
+    // its own manager, so per-spec injectors never share sandboxes and every spec
+    // pays a fresh sandbox. Bind one shared manager into every injector to restore
+    // the sandbox reuse behavior of the stock RobolectricTestRunner.
+    private val sharedSandboxManager: SandboxManager by lazy {
+      defaultInjector().build().getInstance(SandboxManager::class.java)
+    }
 
     private fun kotestInjector(config: Config): Injector {
       val defaultInjector = defaultInjector()
         .bind(Config::class.java, config)
         .bind(ConfigurationStrategy::class.java, KotestHierarchicalConfigurationStrategy::class.java)
+        .bind(SandboxManager::class.java, sharedSandboxManager)
         .build()
       return Injector.Builder(defaultInjector, ContainedRobolectricRunner::class.java.classLoader)
         .build()
