@@ -12,6 +12,12 @@ import io.kotest.core.test.TestCase
 import io.kotest.core.test.isRootTest
 import io.kotest.engine.test.TestResult
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.ConscryptMode
+import org.robolectric.annotation.GetInstallerPackageNameMode
+import org.robolectric.annotation.GraphicsMode
+import org.robolectric.annotation.LooperMode
+import org.robolectric.annotation.ResourcesMode
+import org.robolectric.annotation.SQLiteMode
 import java.util.WeakHashMap
 import kotlin.reflect.KClass
 import kotlin.reflect.full.findAnnotation
@@ -101,10 +107,11 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
     clazz.findAnnotation<RobolectricTest>() ?: return null
 
     val config = clazz.getConfig()
+    val modeOverrides = clazz.getModeOverrides()
     val sdks = config.sdk
 
     if (sdks.size <= 1) {
-      val runner = ContainedRobolectricRunner(config)
+      val runner = ContainedRobolectricRunner(config, modeOverrides)
       val spec = runner.sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
       runnerMap[spec] = runner
       return spec
@@ -115,7 +122,7 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
 
     val sdkEntries = sdks.map { sdk ->
       val singleSdkConfig = Config.Builder(config).setSdk(sdk).build()
-      val runner = ContainedRobolectricRunner(singleSdkConfig)
+      val runner = ContainedRobolectricRunner(singleSdkConfig, modeOverrides)
       val spec = runner.sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
       SdkEntry(sdk, runner, spec)
     }
@@ -187,6 +194,27 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
 
       result
     }
+  }
+
+  /**
+   * Robolectric mode annotations (@LooperMode, @GraphicsMode, ...) declared on the spec class or
+   * one of its superclasses, mirroring the lookup [getConfig] does for @Config.
+   */
+  private fun KClass<*>.getModeOverrides(): ModeOverrides {
+    val classes = listOf(this.java).plus(this.java.getParentClass())
+    fun <A : Annotation> findAnnotation(annotationClass: Class<A>): A? =
+      classes.firstNotNullOfOrNull { it.getAnnotation(annotationClass) }
+
+    val values = buildMap<Class<*>, Any> {
+      findAnnotation(LooperMode::class.java)?.let { put(LooperMode.Mode::class.java, it.value) }
+      findAnnotation(GraphicsMode::class.java)?.let { put(GraphicsMode.Mode::class.java, it.value) }
+      findAnnotation(SQLiteMode::class.java)?.let { put(SQLiteMode.Mode::class.java, it.value) }
+      findAnnotation(ConscryptMode::class.java)?.let { put(ConscryptMode.Mode::class.java, it.value) }
+      findAnnotation(ResourcesMode::class.java)?.let { put(ResourcesMode.Mode::class.java, it.value) }
+      findAnnotation(GetInstallerPackageNameMode::class.java)
+        ?.let { put(GetInstallerPackageNameMode.Mode::class.java, it.value) }
+    }
+    return ModeOverrides(values)
   }
 }
 

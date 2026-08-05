@@ -21,8 +21,9 @@ import kotlinx.coroutines.withContext
 
 @RunWith(Enclosed::class)
 internal class ContainedRobolectricRunner(
-  config: Config
-) : RobolectricTestRunner(PlaceholderTest::class.java, kotestInjector(config)) {
+  config: Config,
+  modeOverrides: ModeOverrides,
+) : RobolectricTestRunner(PlaceholderTest::class.java, kotestInjector(config, modeOverrides)) {
 
   private val placeHolderMethod: FrameworkMethod = children[0]
   val sdkEnvironment = getSandbox(placeHolderMethod).also {
@@ -100,6 +101,7 @@ internal class ContainedRobolectricRunner(
 
   class KotestHierarchicalConfigurationStrategy(
     private val config: Config,
+    private val modeOverrides: ModeOverrides,
     configurers: Array<Configurer<*>>
   ) : HierarchicalConfigurationStrategy(*configurers) {
     override fun getConfig(testClass: Class<*>?, method: Method?): ConfigurationImpl {
@@ -107,6 +109,7 @@ internal class ContainedRobolectricRunner(
       val config = (configurationImpl.get(Config::class.java) as Config)
       val newConfig = Config.Builder(config).overlay(this.config).build()
       configurationImpl.map()[Config::class.java] = newConfig
+      configurationImpl.map().putAll(modeOverrides.values)
       return configurationImpl
     }
   }
@@ -125,9 +128,10 @@ internal class ContainedRobolectricRunner(
       defaultInjector().build().getInstance(SandboxManager::class.java)
     }
 
-    private fun kotestInjector(config: Config): Injector {
+    private fun kotestInjector(config: Config, modeOverrides: ModeOverrides): Injector {
       val defaultInjector = defaultInjector()
         .bind(Config::class.java, config)
+        .bind(ModeOverrides::class.java, modeOverrides)
         .bind(ConfigurationStrategy::class.java, KotestHierarchicalConfigurationStrategy::class.java)
         .bind(SandboxManager::class.java, sharedSandboxManager)
         .build()
@@ -136,3 +140,16 @@ internal class ContainedRobolectricRunner(
     }
   }
 }
+
+/**
+ * Robolectric config values (LooperMode.Mode, GraphicsMode.Mode, ...) resolved from mode
+ * annotations on the spec class, keyed by config class exactly as the configurers register them.
+ *
+ * Robolectric's configurers resolve annotations against the test class they are given, which is
+ * always [ContainedRobolectricRunner.PlaceholderTest] here — annotations on the actual spec class
+ * are invisible to them, leaving robolectric.properties as the only (classpath-wide) way to change
+ * these modes. [ContainedRobolectricRunner.KotestHierarchicalConfigurationStrategy] overlays these
+ * values onto the resolved configuration, so a spec-level annotation wins over
+ * robolectric.properties and the Robolectric defaults.
+ */
+internal class ModeOverrides(val values: Map<Class<*>, Any>)
