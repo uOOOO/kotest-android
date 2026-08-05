@@ -11,6 +11,7 @@ import io.kotest.core.spec.style.scopes.RootScope
 import io.kotest.core.test.TestCase
 import io.kotest.core.test.isRootTest
 import io.kotest.engine.test.TestResult
+import kotlinx.coroutines.withContext
 import org.robolectric.annotation.Config
 import java.util.WeakHashMap
 import kotlin.reflect.KClass
@@ -174,15 +175,19 @@ class RobolectricExtension : ConstructorExtension, TestCaseExtension {
     val containedRobolectricRunner = sdkRunnerMap[testCase.spec]?.get(testCase.name.name)
       ?: runnerMap[testCase.spec]!!
 
-    if (testCase.isRootTest()) {
-      containedRobolectricRunner.containedBefore()
-    }
-    val result = execute(testCase)
-    if (testCase.isRootTest()) {
-      containedRobolectricRunner.containedAfter()
-    }
+    // Pin environment setup and test body to the runner's dedicated thread so that
+    // main-looper-bound APIs work from the test body. See environmentDispatcher docs.
+    return withContext(containedRobolectricRunner.environmentDispatcher) {
+      if (testCase.isRootTest()) {
+        containedRobolectricRunner.containedBefore()
+      }
+      val result = execute(testCase)
+      if (testCase.isRootTest()) {
+        containedRobolectricRunner.containedAfter()
+      }
 
-    return result
+      result
+    }
   }
 }
 

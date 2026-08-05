@@ -1,5 +1,7 @@
 package br.com.colman.kotest.android.extensions.robolectric
 
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.experimental.runners.Enclosed
 import org.junit.runner.RunWith
 import org.junit.runners.model.FrameworkMethod
@@ -11,6 +13,8 @@ import org.robolectric.pluginapi.config.Configurer
 import org.robolectric.plugins.HierarchicalConfigurationStrategy
 import org.robolectric.util.inject.Injector
 import java.lang.reflect.Method
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(Enclosed::class)
 internal class ContainedRobolectricRunner(
@@ -23,6 +27,20 @@ internal class ContainedRobolectricRunner(
   }
   private val bootStrapMethod = sdkEnvironment.bootstrappedClass<Any>(testClass.javaClass)
     .getMethod(PlaceholderTest::bootStrapMethod.name)
+
+  /**
+   * Single dedicated thread that hosts both the Robolectric environment setup ([containedBefore])
+   * and the test body. Robolectric binds thread-sensitive state (most notably the main Looper in
+   * PAUSED mode) to the thread that runs the environment setup, so the test body must execute on
+   * that same thread for main-looper-bound APIs (Robolectric.buildActivity, ShadowLooper.idle, ...)
+   * to work. Coroutine dispatch gives no such guarantee by itself, hence the explicit pinning.
+   */
+  val environmentDispatcher: ExecutorCoroutineDispatcher =
+    Executors.newSingleThreadExecutor { runnable ->
+      Thread(runnable, "kotest-robolectric-${environmentThreadCount.incrementAndGet()}").apply {
+        isDaemon = true
+      }
+    }.asCoroutineDispatcher()
 
   fun containedBefore() {
     Thread.currentThread().contextClassLoader = sdkEnvironment.robolectricClassLoader
@@ -65,6 +83,8 @@ internal class ContainedRobolectricRunner(
   }
 
   companion object {
+    private val environmentThreadCount = AtomicInteger()
+
     private fun kotestInjector(config: Config): Injector {
       val defaultInjector = defaultInjector()
         .bind(Config::class.java, config)
